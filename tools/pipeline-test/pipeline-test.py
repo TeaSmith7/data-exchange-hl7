@@ -1,16 +1,14 @@
-
 import os
 import subprocess
-
+import json
 from azure.eventhub import EventHubConsumerClient
-
 from azure.cosmos import CosmosClient
-
 from dotenv import load_dotenv
 
 # initialize result objects
 result_eventhubs = {}
 result_cosmosdb = {}
+consumer_client = None
 
 def upload_messages():
     """uses inhouse upload_messages.py tool to send messages through pipeline
@@ -22,25 +20,31 @@ def upload_messages():
     if result:return True;return upload_messages.stderr
 
 def process_event (partition_context, event):
-    print ("TEA event from partition : {} and data: {} ".format(partition_context.partition_id, event))
-    print ("Data : {} ".format(event.body_as_str()))
-    return event.body_as_str()
+    """processes event data 
+    """
+    if partition_context.eventhub_name == os.getenv("ReceiverDebatcherEventHubReceiveName"):
+        data_as_str = event.body_as_str(encoding='UTF-8') # only for receiver debatcher
+        data_as_json = json.loads(data_as_str)[0]['data']
+        if 'blobUrl' in data_as_json:
+            if data_as_json['blobUrl'].endswith("ewl0-45625_txt.txt"):
+                print ("blobURL ",data_as_json['blobUrl'])
+                
+    else:
+        print (event)
+    
+    
 
 def query_eventhubs(connection_string,consumer_group, eventhub_name ):
     """ queries eventhub and updates result dictionary with event data
     """
-    consumerClient = EventHubConsumerClient.from_connection_string(conn_str=connection_string, consumer_group=consumer_group, eventhub_name=eventhub_name)
-    print (consumerClient)
+    #global consumer_client
+    consumer_client = EventHubConsumerClient.from_connection_string(conn_str=connection_string, consumer_group=consumer_group, eventhub_name=eventhub_name)
     try:
-        with consumerClient:
+        with consumer_client:
             # start reading from end of event stream by specifying starting_position
-            event_received = consumerClient.receive(on_event=process_event, starting_position="-1")
-            #update results 
-            result_eventhubs[eventhub_name]= event_received
-            consumerClient.close()
-            return
-    except Exception as e:
-        print (e)
+            consumer_client.receive(on_event=process_event, starting_position="-1")
+    except KeyboardInterrupt:
+        print ("Receiving had stopped")
 
 def query_cosmosdb(container_name):
     """ queries cosmosdb container passed as argument
@@ -61,44 +65,37 @@ def query_cosmosdb(container_name):
     """
      
 def main():
-     # load environment variables
-     load_dotenv()
+     
      # if upload was a success, continue with checking eventhubs
      if upload_messages():
-        # query eventhub for receiver debatcher
+        # load environment variables
+        load_dotenv()
+        #get environment variables from .env file
         connection =  os.getenv("EventHubConnectionString")
-        consumer_group =  os.getenv("EventHubConsumerGroup")
-        receiver_debatcher = os.getenv("ReceiverDebatcherEventHubReceiveName")
-        print (connection, consumer_group, receiver_debatcher)
-        query_eventhubs(connection, consumer_group, receiver_debatcher)
-        #parallel processing
-        redactor_event_hub_name = os.environ("RedactorEventHubReceiveName")
-        struct_validator_event_hub_name = os.environ("RedactorEventHubReceiveName")
-        lake_segs_event_hub_name = os.environ("RedactorEventHubReceiveName")
-        json_lake_event_hub_name = os.environ("RedactorEventHubReceiveName")
-       
-        event_hub_config = [{"event_hub_connection_string":connection,"consumer_group":consumer_group,"event_hub_receiver_name":redactor_event_hub_name},
-                            {"event_hub_connection_string":connection,"consumer_group":consumer_group,"event_hub_receiver_name":struct_validator_event_hub_name},
-                            {"event_hub_connection_string":connection,"consumer_group":consumer_group,"event_hub_receiver_name":lake_segs_event_hub_name},
-                            {"event_hub_connection_string":connection,"consumer_group":consumer_group,"event_hub_receiver_name":json_lake_event_hub_name}]
-       
-        consumer_clients = []
+        receiver_debatcher_event_hub_name = os.getenv("ReceiverDebatcherEventHubReceiveName")
+        redactor_event_hub_name = os.getenv("RedactorEventHubReceiveName")
+        struct_validator_event_hub_name = os.getenv("StructureValidatorEventHubReceiveName")
+        lake_segs_event_hub_name = os.getenv("LakeOfSegsEventHubReceiverName")
+        json_lake_event_hub_name = os.getenv("JsonLakeEventHubReceiverName")
 
+        consumer_group_receiver_debatcher =  os.getenv("ReceiverDebatcherConsumerGroup")
+        consumer_group_redactor = os.getenv("RedactorConsumerGroup")
+        consumer_group_structure = os.getenv("StructureValidatorConsumerGroup")
+        consumer_group_lake_segs = os.getenv("LakeOfSegsConsumerGroup")
+        consumer_group_json_lake = os.getenv("JsonLakeConsumerGroup")
+        
+        event_hub_config = [{"event_hub_connection_string":connection,"consumer_group":consumer_group_receiver_debatcher,"event_hub_receiver_name":receiver_debatcher_event_hub_name},
+                            {"event_hub_connection_string":connection,"consumer_group":consumer_group_redactor,"event_hub_receiver_name":redactor_event_hub_name},
+                            {"event_hub_connection_string":connection,"consumer_group":consumer_group_structure,"event_hub_receiver_name":struct_validator_event_hub_name},
+                            {"event_hub_connection_string":connection,"consumer_group":consumer_group_lake_segs,"event_hub_receiver_name":lake_segs_event_hub_name},
+                            {"event_hub_connection_string":connection,"consumer_group":consumer_group_json_lake,"event_hub_receiver_name":json_lake_event_hub_name}]
+       
+        
         for config in event_hub_config:
-            client = EventHubConsumerClient.from_connection_string(config["event_hub_connection_string"], consumer_group=config["consumer_group"],eventhub_name = config["event_hub_receiver_name"])
-            consumer_clients.append(client)
+            # query each eventhub
+            query_eventhubs(config["event_hub_connection_string"], config["consumer_group"],config["event_hub_receiver_name"])
 
-        for client in consumer_clients:
-            client.receive(on_event=process_event, starting_position="-1")
 
         
-        try:
-            for client in consumer_clients:
-                client.run()
-        except KeyboardInterrupt:
-            for client in consumer_clients:
-                client.close()
-
-
 if __name__=="__main__":
     main()
