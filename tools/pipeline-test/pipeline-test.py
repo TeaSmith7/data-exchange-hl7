@@ -5,10 +5,12 @@ from azure.eventhub import EventHubConsumerClient
 from azure.cosmos import CosmosClient
 from dotenv import load_dotenv
 
-# initialize result objects
-result_eventhubs = {}
-result_cosmosdb = {}
+# initialize result eventhub
+result_eventhubs = {"msgs":[],"count_file_dropped":0,"count_recdeb_ok":0,"count_recdeb_err":0,"count_redactor_ok":0,"count_redactor_err":0,
+                    "count_structure_ok":0,"count_structure_err":0}
+
 consumer_client = None
+
 
 def upload_messages():
     """uses inhouse upload_messages.py tool to send messages through pipeline
@@ -22,15 +24,67 @@ def upload_messages():
 def process_event (partition_context, event):
     """processes event data 
     """
+    global result_eventhubs
+    msg = {"filename":"","message_uuid":"","eventHubName":""}
     if partition_context.eventhub_name == os.getenv("ReceiverDebatcherEventHubReceiveName"):
         data_as_str = event.body_as_str(encoding='UTF-8') # only for receiver debatcher
         data_as_json = json.loads(data_as_str)[0]['data']
+        
         if 'blobUrl' in data_as_json:
-            if data_as_json['blobUrl'].endswith("ewl0-45625_txt.txt"):
-                print ("blobURL ",data_as_json['blobUrl'])
+            result_eventhubs['count_file_dropped']+=1
+            msg["filename"] = data_as_json["blobUrl"]
+            msg["eventHubName"] =partition_context.eventhub_name
                 
-    else:
-        print (event)
+    elif partition_context.eventhub_name == os.getenv("RedactorEventHubReceiveName"):
+        data_as_str = event.body_as_str(encoding='UTF-8')
+        data_as_json = json.loads(data_as_str)
+        result_eventhubs['count_recdeb_ok']+=1
+        if 'metadata' in data_as_json:
+            msg["filename"] = data_as_json["metadata"]["provenance"]["ext_original_file_name"]
+            msg["eventHubName"] =partition_context.eventhub_name
+            
+        if 'message_uuid' in data_as_json:
+            msg["message_uuid"] = data_as_json["message_uuid"]
+            
+    elif partition_context.eventhub_name == os.getenv("StructureValidatorEventHubReceiveName"):
+        data_as_str = event.body_as_str(encoding='UTF-8')
+        data_as_json = json.loads(data_as_str)
+        result_eventhubs['count_redactor_ok'] +=1
+        if 'metadata' in data_as_json:
+            msg["filename"] = data_as_json["metadata"]["provenance"]["ext_original_file_name"]
+            msg["eventHubName"] =partition_context.eventhub_name
+            
+        if 'message_uuid' in data_as_json:
+            msg["message_uuid"] = data_as_json["message_uuid"]
+        
+        
+    elif partition_context.eventhub_name == os.getenv("LakeOfSegsEventHubReceiverName"):
+        data_as_str = event.body_as_str(encoding='UTF-8')
+        data_as_json = json.loads(data_as_str)
+        result_eventhubs['count_structure_ok'] +=1
+        if 'metadata' in data_as_json:
+            print (data_as_json["metadata"])
+            msg["filename"] = data_as_json["metadata"]["provenance"]["ext_original_file_name"]
+            msg["eventHubName"] =partition_context.eventhub_name
+            
+        if 'message_uuid' in data_as_json:
+            msg["message_uuid"] = data_as_json["message_uuid"]
+        
+    elif partition_context.eventhub_name == os.getenv("JsonLakeEventHubReceiverName"):
+        data_as_str = event.body_as_str(encoding='UTF-8')
+        data_as_json = json.loads(data_as_str)
+        if 'metadata' in data_as_json:
+            msg["filename"] = data_as_json["metadata"]["provenance"]["ext_original_file_name"]
+            msg["eventHubName"] =partition_context.eventhub_name
+            
+        if 'message_uuid' in data_as_json:
+            msg["message_uuid"] = data_as_json["message_uuid"]
+       
+
+    partition_context.update_checkpoint(event)
+    result_eventhubs["msgs"].append(msg)
+    consumer_client.close()
+    
     
     
 
@@ -38,11 +92,13 @@ def query_eventhubs(connection_string,consumer_group, eventhub_name ):
     """ queries eventhub and updates result dictionary with event data
     """
     #global consumer_client
+    global consumer_client
     consumer_client = EventHubConsumerClient.from_connection_string(conn_str=connection_string, consumer_group=consumer_group, eventhub_name=eventhub_name)
     try:
         with consumer_client:
             # start reading from end of event stream by specifying starting_position
             consumer_client.receive(on_event=process_event, starting_position="-1")
+            consumer_client.close()
     except KeyboardInterrupt:
         print ("Receiving had stopped")
 
@@ -59,7 +115,7 @@ def query_cosmosdb(container_name):
 
     container = client.get_database_client(database_name).get_container_client(container_name)
 
-    query = "Select * FROM c"
+    query = "Select * FROM c.id={}".format(message_uuid)
 
     items = list(container.query_items(query, enable_cross_partition_query=True))
     """
@@ -94,8 +150,6 @@ def main():
         for config in event_hub_config:
             # query each eventhub
             query_eventhubs(config["event_hub_connection_string"], config["consumer_group"],config["event_hub_receiver_name"])
-
-
-        
+        print (result_eventhubs)
 if __name__=="__main__":
     main()
